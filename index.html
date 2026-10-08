@@ -238,6 +238,42 @@
   .hoja canvas { display: block; max-width: none; }
   .hoja.noche canvas { filter: invert(.9) hue-rotate(180deg); }
   .aviso { border-left: 4px solid var(--amber); }
+  .segmentos.modo { grid-template-columns: 1fr 1fr; }
+  .barra .sep { width: 1px; height: 24px; background: var(--line); margin: 0 2px; flex: none; }
+  .barra .icon-btn { width: 42px; flex: none; }
+  .barra .icon-btn:disabled { opacity: .35; cursor: default; background: transparent; color: var(--ink-2); }
+  .pag-actual { margin: 0 auto; padding: 0 4px; display: grid; justify-items: center; gap: 1px; font: 600 .9rem/1.15 var(--sans); color: var(--ink); text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .pag-actual small { font: 600 .66rem/1.1 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--wine); }
+  .aa { font-family: var(--display); font-weight: 700; line-height: 1; }
+  .aa.chica { font-size: .95rem; }
+  .aa.grande { font-size: 1.45rem; }
+  .progreso { height: 8px; border-radius: 99px; background: var(--line); overflow: hidden; }
+  .progreso span { display: block; height: 100%; width: 0; background: var(--wine); transition: width .2s; }
+
+  /* Modo texto: la letra se agranda y las líneas se acomodan al ancho */
+  .t-cab { padding: 6px 2px 0; }
+  .t-cab h1 { font-size: 2rem; margin-top: 4px; }
+  .texto {
+    font: 400 var(--letra, 19px)/1.75 var(--serif); color: var(--ink);
+    max-width: 34em; width: 100%; margin: 0 auto; padding: 0 2px;
+    hyphens: auto; -webkit-hyphens: auto; overflow-wrap: break-word;
+  }
+  .texto p { margin: 0 0 1em; }
+  .texto h2, .texto h3, .texto h4 { font-family: var(--display); color: var(--wine); line-height: 1.2; margin: 1.5em 0 .6em; hyphens: manual; }
+  .texto h2 { font-size: 1.7em; text-align: center; }
+  .texto h3 { font-size: 1.4em; }
+  .texto h4 { font-size: 1.2em; }
+  .texto > :first-child { margin-top: .4em; }
+  .texto blockquote { margin: 0 0 1em; padding: .1em 0 .1em .9em; border-left: 3px solid var(--amber); font-style: italic; }
+  .texto blockquote p { margin: 0 0 .5em; }
+  .texto .t-firma { text-align: right; font: 600 .78em/1.4 var(--sans); letter-spacing: .12em; color: var(--ink-2); font-style: normal; }
+  .texto .pg {
+    display: inline-block; margin: 0 .3em; padding: .2em .55em; border-radius: 99px;
+    border: 1px solid var(--line); background: var(--paper);
+    font: 600 .5em/1.2 var(--sans); font-style: normal; color: var(--ink-2); vertical-align: .25em;
+    -webkit-user-select: none; user-select: none;
+  }
+  .texto .pg::before { content: 'pág. '; }
 
   /* Cuaderno */
   .nota-texto { white-space: pre-wrap; }

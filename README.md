@@ -3,7 +3,7 @@
 App web instalable (PWA) para leer de a dos *El arte de amar* de Erich Fromm.
 
 - **Plan**: el libro en 10 encuentros cortos (págs. del PDF de 128 páginas), cada uno con de qué va, ideas para fijarse, preguntas para conversar y una nota propia.
-- **Leer**: cada quien elige su PDF; se guarda solo en su celular (IndexedDB) y se lee dentro de la app con PDF.js.
+- **Leer**: cada quien elige su PDF; se guarda solo en su celular (IndexedDB). Por defecto se lee en **modo texto**: la primera vez la app saca el texto con PDF.js (párrafos, títulos, citas, palabras cortadas con guion unidas otra vez) y lo guarda; así la letra se agranda y las líneas se acomodan al ancho del celular, con la página del libro marcada en el texto. También está la **página original**.
 - **Entre los dos**: «Contarle cómo voy» manda un mensaje con un enlace (`#de=…`); al abrirlo o pegarlo, la app del otro muestra su avance. No hay servidor ni cuentas.
 - **Cuaderno**: todas las notas juntas, para copiar o compartir.
 

@@ -1,6 +1,6 @@
 // Guarda la app para que abra sin internet.
 // Al cambiar cualquier archivo, sube VERSION para que los celulares la actualicen.
-const VERSION = 'leamos-v1';
+const VERSION = 'leamos-v2';
 const BASE = [
   './',
   './index.html',

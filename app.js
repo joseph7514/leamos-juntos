@@ -34,7 +34,7 @@
 
   /* ---------- Datos guardados en este celular ---------- */
 
-  const base = () => ({ yo: '', amigo: '', tema: 'auto', proxima: '', pagina: 1, zoom: 1, noche: false, enc: {}, suyo: null, invitadoPor: '' });
+  const base = () => ({ yo: '', amigo: '', tema: 'auto', proxima: '', pagina: 1, zoom: 1, modo: 'texto', letra: 2, marca: null, leyendo: null, enc: {}, suyo: null, invitadoPor: '' });
   function cargar() {
     try { return Object.assign(base(), JSON.parse(localStorage.getItem(KEY)) || {}); } catch (e) { return base(); }
   }
@@ -65,11 +65,13 @@
 
   /* ---------- Tema ---------- */
 
+  const esOscuro = () => S.tema === 'dark' || (S.tema === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
   function aplicarTema() {
     const r = document.documentElement;
     if (S.tema === 'auto') r.removeAttribute('data-theme'); else r.setAttribute('data-theme', S.tema);
-    const oscuro = S.tema === 'dark' || (S.tema === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
-    $('meta[name="theme-color"]').setAttribute('content', oscuro ? '#191412' : '#8E2C3A');
+    $('meta[name="theme-color"]').setAttribute('content', esOscuro() ? '#191412' : '#8E2C3A');
+    const hoja = $('#hoja');
+    if (hoja) hoja.classList.toggle('noche', esOscuro());
   }
 
   /* ---------- Enlaces entre los dos ---------- */
@@ -373,6 +375,213 @@
     return true;
   }
 
+  /* ---------- Texto del libro: se saca del PDF para leerlo con la letra que uno quiera ---------- */
+
+  const TEXTO_V = 1;
+  const LETRAS = [15, 17, 19, 21, 24, 27, 30];
+  const PRIVADO = /[-]/g;
+  const ES_PRIVADO = /[-]/;
+  let texto = null;
+  let vocab = null;
+
+  const firmaDe = g => [g.nombre, g.tamano, g.paginas, TEXTO_V].join('|');
+
+  // Líneas de una página, con su posición, tamaño y tipo de letra.
+  async function lineasDePagina(n) {
+    const page = await pdfDoc.getPage(n);
+    const tc = await page.getTextContent();
+    const ls = [];
+    for (const it of tc.items) {
+      if (!it.str.trim()) continue;
+      const [a, b, , , x, y] = it.transform;
+      const fs = Math.round(Math.hypot(a, b) * 10) / 10;
+      let l = ls.find(o => Math.abs(o.y - y) < fs * 0.4);
+      if (!l) { l = { y, items: [] }; ls.push(l); }
+      l.items.push({ x, w: it.width, s: it.str, fs, f: it.fontName });
+    }
+    ls.sort((a, b) => b.y - a.y);
+    return ls.map(l => {
+      l.items.sort((a, b) => a.x - b.x);
+      let t = '';
+      let fin = null;
+      const peso = {};
+      for (const i of l.items) {
+        if (fin !== null && i.x - fin > i.fs * 0.15 && !/\s$/.test(t) && !/^\s/.test(i.s)) t += ' ';
+        t += i.s;
+        fin = i.x + i.w;
+        const letras = i.s.replace(PRIVADO, '').trim().length;
+        if (letras) peso[i.f] = (peso[i.f] || 0) + letras;
+      }
+      const x = l.items[0].x;
+      return {
+        y: l.y, x, w: fin - x,
+        fs: Math.max(...l.items.map(i => i.fs)),
+        f: Object.keys(peso).sort((p, q) => peso[q] - peso[p])[0],
+        bala: ES_PRIVADO.test(t.trim().charAt(0)),
+        t: t.replace(PRIVADO, '').replace(/\s+/g, ' ').trim()
+      };
+    }).filter(l => l.t && !/^-?\s*\d{1,4}\s*-?$/.test(l.t));
+  }
+
+  function masComun(pares) {
+    const m = new Map();
+    for (const [k, w] of pares) m.set(k, (m.get(k) || 0) + w);
+    let mejor = null;
+    let max = -1;
+    for (const [k, w] of m) if (w > max) { mejor = k; max = w; }
+    return mejor;
+  }
+
+  // Cómo es el texto normal del libro: tamaño, letra, margen, ancho y separación entre líneas.
+  function medidas(paginas) {
+    const todas = paginas.flatMap(p => p.lineas);
+    const fs = masComun(todas.map(l => [l.fs, l.t.length]));
+    const f = masComun(todas.map(l => [l.f, l.t.length]));
+    const x = masComun(todas.map(l => [Math.round(l.x), l.t.length]));
+    const anchos = todas.filter(l => l.fs === fs && l.f === f && Math.abs(l.x - x) < 3).map(l => l.w).sort((a, b) => a - b);
+    const pasos = [];
+    for (const p of paginas) for (let i = 1; i < p.lineas.length; i++) pasos.push([Math.round(p.lineas[i - 1].y - p.lineas[i].y), 1]);
+    const titulos = todas.filter(l => l.fs > fs + 0.5);
+    return {
+      fs, f, x,
+      ancho: anchos[Math.floor(anchos.length * 0.9)] || 300,
+      paso: masComun(pasos) || fs * 1.2,
+      fTitulo: titulos.length ? masComun(titulos.map(l => [l.f, 1])) : null
+    };
+  }
+
+  // En texto justificado, una línea que no llega al margen y termina en punto cierra el párrafo.
+  const cierraParrafo = (l, m) => l.x + l.w < m.x + m.ancho * 0.85 && /[.!?:»"”)…]$/.test(l.t);
+
+  // Junta líneas seguidas: se corta donde hay un espacio grande, una viñeta, cambia la sangría o cierra un párrafo.
+  function agrupar(lineas, m) {
+    const gs = [];
+    let g = null;
+    let prev = null;
+    for (const l of lineas) {
+      const cat = l.x > m.x + 3 ? 'cita' : 'p';
+      if (!g || l.bala || prev.y - l.y > m.paso * 1.5 || Math.abs(l.fs - prev.fs) > 0.5 || cat !== g.cat || cierraParrafo(prev, m)) {
+        g = { cat, lineas: [] };
+        gs.push(g);
+      }
+      g.lineas.push(l);
+      prev = l;
+    }
+    return gs;
+  }
+
+  function clasificar(g, previo, m) {
+    const ls = g.lineas;
+    const t = ls.map(l => l.t).join(' ');
+    const corto = ls.every(l => l.w < m.ancho * 0.75);
+    const mayus = /[A-ZÁÉÍÓÚÑ]/.test(t) && t === t.toUpperCase();
+    if (ls.some(l => l.fs > m.fs + 0.5)) return { t: 'h', n: ls[0].fs > m.fs * 1.3 ? 1 : 2 };
+    if (ls.length === 1 && corto && ls[0].x > m.x + m.ancho * 0.45) return { t: 'firma' };
+    if (ls.length <= 2 && corto && (ls[0].f === m.fTitulo || mayus)) {
+      if (mayus && previo && (previo.t === 'p' || previo.t === 'cita') && t.split(' ').length <= 3 && !/^[IVXLC\d]+[.)]/.test(t)) return { t: 'firma' };
+      return { t: 'h', n: 3 };
+    }
+    return { t: g.cat };
+  }
+
+  // Agrega una línea al párrafo: une las palabras cortadas con guion y marca dónde empieza cada página.
+  function unir(b, t, pag) {
+    const marca = pag ? '<span class="pg" data-p="' + pag + '" aria-hidden="true">' + pag + '</span>' : '';
+    if (!b.texto) { b.texto = t; b.html = marca + esc(t); return; }
+    if (/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]-$/.test(b.texto)) {
+      const antes = b.texto.slice(0, -1);
+      const abiertas = (antes.match(/(^|\s)-(?=\S)/g) || []).length;
+      const cerradas = (antes.match(/\S-(?=[\s,.;:)»]|$)/g) || []).length;
+      if (esCorteDePalabra(antes, t, abiertas > cerradas)) {
+        if (/^[a-záéíóúüñ]/.test(t)) {
+          const corte = t.indexOf(' ');
+          const prim = corte < 0 ? t : t.slice(0, corte);
+          const resto = corte < 0 ? '' : t.slice(corte);
+          b.texto = antes + t;
+          b.html = b.html.slice(0, -1) + esc(prim) + marca + esc(resto);
+          return;
+        }
+        b.texto += t;
+        b.html += marca + esc(t);
+        return;
+      }
+    }
+    const sep = /[(\[¿¡«]$/.test(b.texto) ? '' : ' ';
+    b.texto += sep + t;
+    b.html += sep + marca + esc(t);
+  }
+
+  // ¿El guion al final de la línea corta una palabra («triste-za») o cierra un inciso («tolerante- para»)?
+  // Se decide con las palabras que el mismo libro usa enteras.
+  function esCorteDePalabra(antes, t, incisoAbierto) {
+    const frag = (antes.match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+$/) || [''])[0].toLowerCase();
+    const sig = (t.match(/^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+/) || [''])[0].toLowerCase();
+    if (!vocab || !frag || !sig) return !incisoAbierto;
+    if (sig === 'mente' || (/(ar|er|ir)$/.test(frag) && PRONOMBRES.has(sig))) return true;
+    if (vocab.has(frag + sig) && !(incisoAbierto && vocab.has(sig))) return true;
+    if (!vocab.has(frag) || (frag.length <= 3 && !vocab.has(sig))) return true;
+    return !incisoAbierto;
+  }
+  const PRONOMBRES = new Set(['se', 'lo', 'la', 'le', 'los', 'las', 'les', 'nos', 'me', 'te']);
+
+  // Palabras que aparecen enteras: las del medio de cada línea, sin guiones.
+  function armarVocabulario(paginas) {
+    const v = new Set();
+    for (const p of paginas) for (const l of p.lineas) {
+      const ps = l.t.split(' ');
+      ps.slice(1, ps[ps.length - 1].endsWith('-') ? -1 : undefined).forEach(w => {
+        if (w.includes('-')) return;
+        const limpia = w.toLowerCase().replace(/[^a-záéíóúüñ]/g, '');
+        if (limpia) v.add(limpia);
+      });
+    }
+    return v;
+  }
+
+  function armarBloques(paginas, m) {
+    const bloques = [];
+    let colgando = null;
+    for (const pag of paginas) {
+      const gs = agrupar(pag.lineas, m);
+      gs.forEach((g, i) => {
+        const c = clasificar(g, bloques[bloques.length - 1], m);
+        const l0 = g.lineas[0];
+        // ¿Es el mismo párrafo que venía de la página anterior?
+        const sigue = i === 0 && colgando && colgando.b.t === c.t && (c.t === 'p' || c.t === 'cita') && !l0.bala
+          && (!cierraParrafo(colgando.ultima, m) || /^[a-záéíóúüñ]/.test(l0.t));
+        const b = sigue ? colgando.b : { t: c.t, n: c.n, p: pag.n, texto: '', html: '' };
+        if (!sigue) bloques.push(b);
+        g.lineas.forEach((l, j) => unir(b, l.t, sigue && j === 0 ? pag.n : 0));
+        if (i === gs.length - 1) colgando = { b, ultima: g.lineas[g.lineas.length - 1] };
+      });
+      if (!gs.length) colgando = null;
+    }
+    return bloques.map(b => ({ t: b.t, n: b.n, p: b.p, h: b.html }));
+  }
+
+  async function prepararTexto(alAvanzar) {
+    const g = await idbGet('libro');
+    if (!g) return null;
+    const firma = firmaDe(g);
+    if (texto && texto.firma === firma) return texto;
+    const guardado = await idbGet('texto');
+    if (guardado && guardado.firma === firma) return (texto = guardado);
+    await abrirPdfGuardado();
+    const paginas = [];
+    for (let n = 1; n <= pdfDoc.numPages; n++) {
+      paginas.push({ n, lineas: await lineasDePagina(n) });
+      if (alAvanzar && n % 4 === 0) alAvanzar(n / pdfDoc.numPages);
+    }
+    const letras = paginas.reduce((s, p) => s + p.lineas.reduce((a, l) => a + l.t.length, 0), 0);
+    vocab = armarVocabulario(paginas);
+    texto = { firma, bloques: letras < 500 ? [] : armarBloques(paginas, medidas(paginas)) };
+    vocab = null;
+    idbSet('texto', texto).catch(() => {});
+    return texto;
+  }
+
+  /* ---------- Vistas del lector ---------- */
+
   function vistaLeerVacia(error) {
     return '<div class="titulo-vista"><p class="eyebrow">Leer</p><h1>Tu copia del libro</h1></div>'
       + '<section class="card"><p>Elige el PDF de <em>El arte de amar</em> que tienes en el celular. Se guarda <strong>solo aquí</strong>, en este dispositivo: no se sube a internet.</p>'
@@ -381,17 +590,75 @@
       + (error ? '<p class="ayuda" role="alert">' + esc(error) + '</p>' : '') + '</section>';
   }
 
-  function vistaLeer() {
-    return '<div class="barra" role="toolbar" aria-label="Controles de lectura">'
+  const selectorModo = () => '<div class="segmentos modo" role="group" aria-label="Cómo leer">'
+    + '<button type="button" data-accion="modo" data-valor="texto" aria-pressed="' + (S.modo !== 'pagina') + '">Texto</button>'
+    + '<button type="button" data-accion="modo" data-valor="pagina" aria-pressed="' + (S.modo === 'pagina') + '">Página original</button></div>';
+
+  function vistaPreparando() {
+    return selectorModo() + '<section class="card"><h3>Preparando el texto…</h3>'
+      + '<p class="suave">Saco el texto del PDF para que puedas agrandar la letra. Solo pasa la primera vez.</p>'
+      + '<div class="progreso" role="progressbar" aria-label="Avance"><span id="prep-barra"></span></div></section>';
+  }
+
+  // El encuentro que se está leyendo: el último abierto, mientras la página siga dentro de él.
+  function encLectura() {
+    const e = S.leyendo && L.encuentros[S.leyendo - 1];
+    if (e && S.pagina >= e.desde && S.pagina <= e.hasta + 1) return e;
+    return encDePagina(S.pagina) || L.encuentros[0];
+  }
+
+  function finEncuentro(e) {
+    const sig = L.encuentros[e.id];
+    const leido = enc(e.id).leido;
+    return '<section class="card aviso" id="fin-enc"><p class="eyebrow">Fin del encuentro ' + e.id + '</p><h3>' + esc(e.titulo) + '</h3><div class="fila">'
+      + (leido
+        ? '<a class="btn" href="#plan/' + e.id + '">' + ic('charla') + 'Preguntas y mi nota</a>'
+        : '<button class="btn primario" data-accion="leido-desde-lector" data-id="' + e.id + '">' + ic('check') + 'Marcar como leído</button>')
+      + (sig ? '<button class="btn" data-accion="enc-sig">Siguiente encuentro' + ic('der') + '</button>' : '')
+      + '</div></section>';
+  }
+
+  function vistaTexto(e) {
+    const barra = '<div class="barra" role="toolbar" aria-label="Controles de lectura">'
+      + '<button class="icon-btn" data-accion="enc-ant" aria-label="Encuentro anterior"' + (e.id <= 1 ? ' disabled' : '') + '>' + ic('izq') + '</button>'
+      + '<span class="pag-actual"><small>Encuentro ' + e.id + '</small><span id="pag-actual">pág. ' + S.pagina + '</span></span>'
+      + '<button class="icon-btn" data-accion="enc-sig" aria-label="Encuentro siguiente"' + (e.id >= TOTAL ? ' disabled' : '') + '>' + ic('der') + '</button>'
+      + '<span class="sep" aria-hidden="true"></span>'
+      + '<button class="icon-btn" data-accion="letra-menos" aria-label="Letra más chica"' + (S.letra <= 0 ? ' disabled' : '') + '><span class="aa chica" aria-hidden="true">A</span></button>'
+      + '<button class="icon-btn" data-accion="letra-mas" aria-label="Letra más grande"' + (S.letra >= LETRAS.length - 1 ? ' disabled' : '') + '><span class="aa grande" aria-hidden="true">A</span></button>'
+      + '</div>';
+    const cab = '<header class="t-cab"><p class="eyebrow">Encuentro ' + e.id + ' de ' + TOTAL + ' · págs. ' + e.desde + '–' + e.hasta + '</p><h1>' + esc(e.titulo) + '</h1></header>';
+
+    if (!texto.bloques.length) {
+      return selectorModo() + barra + cab + '<section class="card aviso"><p>Este PDF no trae texto que se pueda agrandar (parece escaneado). Léelo en <strong>Página original</strong>.</p></section>';
+    }
+    let cuerpo = '';
+    let enCita = false;
+    texto.bloques.forEach((b, i) => {
+      if (b.p < e.desde || b.p > e.hasta) return;
+      const at = ' data-b="' + i + '" data-p="' + b.p + '"';
+      if (b.t === 'cita' && !enCita) { cuerpo += '<blockquote>'; enCita = true; }
+      if (b.t !== 'cita' && enCita) { cuerpo += '</blockquote>'; enCita = false; }
+      if (b.t === 'h') cuerpo += '<h' + (b.n + 1) + at + '>' + b.h + '</h' + (b.n + 1) + '>';
+      else cuerpo += '<p' + (b.t === 'firma' ? ' class="t-firma"' : '') + at + '>' + b.h + '</p>';
+    });
+    if (enCita) cuerpo += '</blockquote>';
+    return selectorModo() + barra + cab
+      + '<article class="texto" id="texto" lang="es" style="--letra:' + LETRAS[S.letra] + 'px">' + cuerpo + '</article>'
+      + finEncuentro(e);
+  }
+
+  function vistaPagina() {
+    return selectorModo() + '<div class="barra" role="toolbar" aria-label="Controles de lectura">'
       + '<button class="icon-btn" data-accion="pag-ant" aria-label="Página anterior">' + ic('izq') + '</button>'
       + '<label class="pag"><span class="sr">Página</span><input type="number" inputmode="numeric" min="1" id="pag-num" value="' + S.pagina + '"><span id="pag-total">/ …</span></label>'
       + '<button class="icon-btn" data-accion="pag-sig" aria-label="Página siguiente">' + ic('der') + '</button>'
+      + '<span class="sep" aria-hidden="true"></span>'
       + '<button class="icon-btn" data-accion="zoom-menos" aria-label="Achicar">' + ic('menos') + '</button>'
-      + '<button class="icon-btn" data-accion="zoom-mas" aria-label="Agrandar">' + ic('mas') + '</button>'
-      + '<button class="icon-btn" data-accion="noche" aria-label="Página oscura" aria-pressed="' + S.noche + '">' + ic('luna') + '</button></div>'
+      + '<button class="icon-btn" data-accion="zoom-mas" aria-label="Agrandar">' + ic('mas') + '</button></div>'
       + '<p class="meta donde" id="donde"></p>'
-      + '<div class="hoja' + (S.noche ? ' noche' : '') + (S.zoom > 1 ? ' zoom' : '') + '" id="hoja"><canvas role="img" aria-label="Página del libro"></canvas></div>'
-      + '<section class="card aviso" id="fin-enc" hidden></section>';
+      + '<div class="hoja' + (esOscuro() ? ' noche' : '') + (S.zoom > 1 ? ' zoom' : '') + '" id="hoja"><canvas role="img" aria-label="Página del libro"></canvas></div>'
+      + '<section class="card aviso" id="fin-pag" hidden></section>';
   }
 
   async function pintarPagina() {
@@ -423,7 +690,7 @@
     $('[data-accion="pag-sig"]').disabled = n >= pdfDoc.numPages;
     const e = encDePagina(n);
     $('#donde').textContent = e ? 'Encuentro ' + e.id + ' · ' + e.titulo + ' · págs. ' + e.desde + '–' + e.hasta : '';
-    const fin = $('#fin-enc');
+    const fin = $('#fin-pag');
     if (e && n === e.hasta) {
       fin.hidden = false;
       fin.innerHTML = enc(e.id).leido
@@ -434,18 +701,112 @@
     }
   }
 
+  /* ---------- Dónde va la lectura ---------- */
+
+  // Altura de la línea donde uno está leyendo: justo debajo de la barra fija.
+  const lineaLectura = () => ($('.top') ? $('.top').offsetHeight : 60) + ($('.barra') ? $('.barra').offsetHeight : 56) + 16;
+
+  function posicionActual() {
+    const art = $('#texto');
+    if (!art) return null;
+    const linea = lineaLectura();
+    let pag = null;
+    let bloque = null;
+    for (const el of art.querySelectorAll('[data-p]')) {
+      if (el.getBoundingClientRect().top > linea) break;
+      pag = +el.dataset.p;
+      if (el.dataset.b) bloque = el;
+    }
+    if (!bloque) {
+      bloque = art.querySelector('[data-b]');
+      if (!bloque) return null;
+      pag = +bloque.dataset.p;
+    }
+    const r = bloque.getBoundingClientRect();
+    return { pag, b: +bloque.dataset.b, f: r.height ? Math.min(1, Math.max(0, (linea - r.top) / r.height)) : 0 };
+  }
+
+  function irAPosicion(b, f) {
+    const el = document.querySelector('#texto [data-b="' + b + '"]');
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    window.scrollTo(0, Math.max(0, scrollY + r.top + r.height * (f || 0) - lineaLectura() + 2));
+    return true;
+  }
+
+  function ubicarLectura(e) {
+    if (S.marca && S.marca.e === e.id && irAPosicion(S.marca.b, S.marca.f)) return;
+    const el = S.pagina > e.desde && document.querySelector('#texto [data-p="' + S.pagina + '"]');
+    if (el) window.scrollTo(0, Math.max(0, scrollY + el.getBoundingClientRect().top - lineaLectura() + 2));
+    else window.scrollTo(0, 0);
+  }
+
+  let seguirPend = false;
+  let guardarT;
+  function seguirLectura() {
+    if (seguirPend) return;
+    seguirPend = true;
+    requestAnimationFrame(() => {
+      seguirPend = false;
+      const pos = posicionActual();
+      if (!pos || ruta().v !== 'leer') return;
+      const e = encLectura();
+      S.pagina = pos.pag;
+      S.leyendo = e.id;
+      S.marca = { e: e.id, b: pos.b, f: Math.round(pos.f * 1000) / 1000 };
+      const lab = $('#pag-actual');
+      if (lab) lab.textContent = 'pág. ' + pos.pag;
+      clearTimeout(guardarT);
+      guardarT = setTimeout(guardar, 400);
+    });
+  }
+  window.addEventListener('scroll', () => { if ($('#texto')) seguirLectura(); }, { passive: true });
+
+  function cambiarLetra(d) {
+    const nueva = Math.min(LETRAS.length - 1, Math.max(0, S.letra + d));
+    const art = $('#texto');
+    if (nueva === S.letra || !art) return;
+    const pos = posicionActual();
+    S.letra = nueva; guardar();
+    art.style.setProperty('--letra', LETRAS[nueva] + 'px');
+    $('[data-accion="letra-menos"]').disabled = nueva <= 0;
+    $('[data-accion="letra-mas"]').disabled = nueva >= LETRAS.length - 1;
+    if (pos) irAPosicion(pos.b, pos.f);
+  }
+
+  function abrirEncuentro(id) {
+    const e = L.encuentros[id - 1];
+    if (!e) return;
+    S.pagina = e.desde; S.leyendo = id; S.marca = null; guardar();
+    montarLector();
+  }
+
   async function montarLector() {
     const v = $('#vista');
+    // El texto que se va: que el seguimiento de lectura pendiente ya no lo mida.
+    const viejo = $('#texto');
+    if (viejo) viejo.removeAttribute('id');
+    const poner = html => { if (ruta().v === 'leer') { v.innerHTML = '<div class="vista">' + html + '</div>'; return true; } return false; };
     try {
-      if (!(await abrirPdfGuardado())) { if (ruta().v === 'leer') v.innerHTML = '<div class="vista">' + vistaLeerVacia() + '</div>'; return; }
-    } catch (e) {
-      console.error(e);
-      if (ruta().v === 'leer') v.innerHTML = '<div class="vista">' + vistaLeerVacia(navigator.onLine ? 'No se pudo abrir el PDF guardado. Vuelve a elegirlo.' : 'Para abrir el libro la primera vez hace falta internet.') + '</div>';
-      return;
+      const g = await idbGet('libro');
+      if (!g) { poner(vistaLeerVacia()); return; }
+      if (S.modo === 'pagina') {
+        await abrirPdfGuardado();
+        if (poner(vistaPagina())) pintarPagina();
+        return;
+      }
+      if (!texto || texto.firma !== firmaDe(g)) {
+        poner(vistaPreparando());
+        await prepararTexto(f => { const b = $('#prep-barra'); if (b) b.style.width = Math.round(f * 100) + '%'; });
+      }
+      const e = encLectura();
+      if (!poner(vistaTexto(e))) return;
+      if (document.fonts && document.fonts.ready) await document.fonts.ready.catch(() => {});
+      ubicarLectura(e);
+    } catch (err) {
+      console.error(err);
+      poner(vistaLeerVacia(navigator.onLine ? 'No se pudo abrir el PDF guardado. Vuelve a elegirlo.' : 'Para abrir el libro la primera vez hace falta internet.'));
     }
-    if (ruta().v !== 'leer') return;
-    v.innerHTML = '<div class="vista">' + vistaLeer() + '</div>';
-    pintarPagina();
   }
 
   async function guardarPdf(archivo) {
@@ -457,7 +818,8 @@
       const lib = await pdfjs();
       const doc = await lib.getDocument({ data: new Uint8Array(datos.slice(0)) }).promise;
       await idbSet('libro', { nombre: archivo.name, tamano: archivo.size, paginas: doc.numPages, datos });
-      pdfDoc = doc;
+      await idbDel('texto');
+      pdfDoc = doc; texto = null; S.marca = null;
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
       toast(doc.numPages === L.paginas ? 'Listo: el libro quedó guardado en este celular' : 'Guardado, pero tiene ' + doc.numPages + ' páginas: los números del plan pueden no coincidir');
       if (ruta().v === 'leer') montarLector(); else mostrar();
@@ -468,8 +830,10 @@
   }
 
   function irPagina(p) {
-    S.pagina = p; guardar();
-    if (ruta().v === 'leer') pintarPagina(); else location.hash = '#leer';
+    S.pagina = p; S.marca = null; S.leyendo = null; guardar();
+    if (ruta().v !== 'leer') location.hash = '#leer';
+    else if (S.modo === 'pagina') pintarPagina();
+    else montarLector();
   }
 
   /* ---------- Mostrar ---------- */
@@ -543,7 +907,8 @@
       const id = +b.dataset.id;
       enc(id).leido = true; guardar();
       toast(id === TOTAL ? '¡Terminaste el libro!' : 'Encuentro ' + id + ' leído. Escribe tu nota cuando quieras');
-      pintarPagina();
+      const fin = $('#fin-enc');
+      if (fin) fin.outerHTML = finEncuentro(L.encuentros[id - 1]); else pintarPagina();
     },
     'ir-pagina'(b) { irPagina(+b.dataset.pagina); },
     'mandar-nota'(b) {
@@ -571,10 +936,19 @@
     'pag-sig'() { irPagina(S.pagina + 1); },
     'zoom-mas'() { S.zoom = Math.min(3, +(S.zoom + 0.25).toFixed(2)); guardar(); $('#hoja').classList.toggle('zoom', S.zoom > 1); pintarPagina(); },
     'zoom-menos'() { S.zoom = Math.max(1, +(S.zoom - 0.25).toFixed(2)); guardar(); $('#hoja').classList.toggle('zoom', S.zoom > 1); pintarPagina(); },
-    noche(b) { S.noche = !S.noche; guardar(); $('#hoja').classList.toggle('noche', S.noche); b.setAttribute('aria-pressed', S.noche); },
+    modo(b) {
+      if (S.modo === b.dataset.valor) return;
+      S.modo = b.dataset.valor;
+      if (S.modo === 'pagina') { S.leyendo = null; } else { S.marca = null; }
+      guardar(); montarLector();
+    },
+    'enc-ant'() { abrirEncuentro(encLectura().id - 1); },
+    'enc-sig'() { abrirEncuentro(encLectura().id + 1); },
+    'letra-mas'() { cambiarLetra(1); },
+    'letra-menos'() { cambiarLetra(-1); },
     async 'quitar-pdf'() {
       if (!confirm('¿Quitar el PDF de este celular? Tus notas no se borran.')) return;
-      await idbDel('libro'); pdfDoc = null; estadoPdf(); toast('PDF quitado');
+      await idbDel('libro'); await idbDel('texto'); pdfDoc = null; texto = null; estadoPdf(); toast('PDF quitado');
     },
     respaldo() {
       bajarArchivo('leamos-respaldo-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(S, null, 2), 'application/json');
@@ -582,7 +956,7 @@
     async 'borrar-todo'() {
       if (!confirm('¿Borrar nombres, notas y avance de este celular? No se puede deshacer.')) return;
       try { localStorage.removeItem(KEY); } catch (e) { /* nada */ }
-      await idbDel('libro'); pdfDoc = null;
+      await idbDel('libro'); await idbDel('texto'); pdfDoc = null; texto = null;
       S = base(); aplicarTema(); abiertos.clear();
       location.hash = '#inicio'; mostrar(); toast('Listo, empezamos de cero');
     }
@@ -652,7 +1026,7 @@
   });
 
   document.addEventListener('keydown', ev => {
-    if (ruta().v !== 'leer' || /input|textarea/i.test(ev.target.tagName)) return;
+    if (ruta().v !== 'leer' || S.modo !== 'pagina' || /input|textarea/i.test(ev.target.tagName)) return;
     if (ev.key === 'ArrowLeft') irPagina(S.pagina - 1);
     if (ev.key === 'ArrowRight') irPagina(S.pagina + 1);
   });
@@ -673,7 +1047,7 @@
   let resizeT;
   window.addEventListener('resize', () => {
     clearTimeout(resizeT);
-    resizeT = setTimeout(() => { if (ruta().v === 'leer') pintarPagina(); }, 200);
+    resizeT = setTimeout(() => { if (ruta().v === 'leer' && S.modo === 'pagina') pintarPagina(); }, 200);
   });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', aplicarTema);
 
